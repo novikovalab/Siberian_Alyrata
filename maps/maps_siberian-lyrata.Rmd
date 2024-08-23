@@ -1,0 +1,356 @@
+---
+title: "Maps for Scott et al. Siberian A. lyrata paper"
+output: html_notebook
+---
+
+```{r}
+# library(tidyverse) or
+library(dplyr)
+library(readr)
+library(tidyr)
+library(stringr)
+
+library(raster) # plotting raster maps
+library(scatterpie)
+library(sf)
+library(ggimage) # plotting chromosome spreads
+library(ggforce)
+
+# for get_repel_coords function
+library(grid)
+library(ggrepel)
+
+theme_set(theme_bw())
+```
+
+# Preparations of external data
+
+## Base map
+
+```{r}
+# Set projection -- Lambert asimuthal works a bit better than orthographic here
+prj <- '+proj=laea +lat_0=40 +lon_0=90'
+
+# Set plot limits in prj units
+xmi <- -6138342 #min(data_pop$X)-1500000
+xma <- 4005882  #max(data_pop$X)+1500000
+ymi <- 386648   #min(data_pop$Y)-1000000
+yma <- 5534604  #max(data_pop$Y)+500000
+
+# Raster map downloaded from https://www.naturalearthdata.com/downloads/50m-raster-data/
+basemap <- 
+  raster::stack('HYP_50M_SR_W.tif') %>% 
+  raster::crop(extent(-180,180,20,90))
+
+# use aggregate(basemap, 20) for a quick map for draft plotting
+# otherwise takes a few minutes to process
+# convert raster to 3D RGB array and then to ggplot raster
+backmap <- 
+  basemap %>% 
+  projectRaster(crs=prj) %>% 
+  raster::crop(extent(xmi,xma,ymi,yma)) %>% 
+  as.array %>% 
+  `/`(max(.[!is.na(.)])) %>% 
+  apply(c(1,2), \(x) {
+    ifelse(!any(is.na(x)), 
+           rgb(matrix(x, ncol = 3)) %>% paste0('E6'), # paste0 adds transparency
+           '#00000000')
+    }) %>% 
+  annotation_raster(xmi, xma, ymi, yma)
+
+```
+
+## Vector map (for Figure 3a)
+
+```{r}
+# Vector map downloaded from https://www.naturalearthdata.com/downloads/110m-physical-vectors/
+vec <- read_sf('ne_110m_coastline.shp')
+```
+
+## LGM ice sheet extent (for Figure 2b)
+
+Ehlers 2011 data: download from <https://booksite.elsevier.com/9780444534477/digital_maps.php>
+
+```{r}
+lgm <- bind_rows(
+  read_sf('./digital_maps_02_all_other_files/lgm.shp'),
+  read_sf('./digital_maps_02_all_other_files/lgm_alpen.shp')
+) %>% 
+  st_transform(prj) %>% 
+  st_crop(c(xmin=xmi,
+            xmax=xma,
+            ymin=ymi,
+            ymax=yma)) %>% 
+  st_simplify(dTolerance = 10000) %>% 
+  st_union() %>% 
+  st_buffer(30000)
+```
+
+## Define the repelling function
+
+```{r}
+# Source: https://github.com/slowkow/ggrepel/issues/24#issuecomment-1180117913
+
+# Supposed you have the table called data,
+# the coordinates are in columns X (longitude) and Y (latitude),
+# and the data for pie slices is in columns A, B, C :
+
+get_repel_coords <- function(.data, g_base, width, height, ...) {
+  grid.newpage()
+  pushViewport(viewport(width = width, height = height))
+  g <- g_base +
+    geom_text_repel(aes(X, Y), label = ".", data = .data, max.overlaps = Inf, ...)
+  panel_params <- ggplot_build(g)$layout$panel_params[[1]]
+  xrg <- panel_params$x.range
+  yrg <- panel_params$y.range
+  
+  textrepeltree <- ggplotGrob(g) %>%
+    grid.force(draw = F) %>%
+    getGrob("textrepeltree", grep = T)
+  children <- childNames(textrepeltree) %>%
+    grep("textrepelgrob", ., value = T)
+  
+  get_xy <- function(n) {
+    grob <- getGrob(textrepeltree, n)
+    data.frame(
+      x.repel = xrg[1] + diff(xrg) * convertX(grob$x, "native", valueOnly = T),
+      y.repel = yrg[1] + diff(yrg) * convertY(grob$y, "native", valueOnly = T)
+    )
+  }
+  lapply(children, get_xy) %>%
+    bind_rows %>%
+    cbind(.data)
+}
+```
+
+# Plotting
+
+## Sampling map (Figure 1a)
+
+```{r}
+data_samp <- 
+  read_tsv('supplementary_table_1.tsv') %>% 
+  filter(Species_fin=="A. lyrata") %>% 
+  mutate(across(c(longitude, latitude), as.numeric),
+         Ploidy = as.character(ploidy_man_curated),
+         Source = ifelse(source_type=='published', 'published', 'our data')) %>% 
+  dplyr::select(c(longitude, latitude, Ploidy, Source)) %>%
+  filter(longitude > -20 | longitude < -170) %>% 
+  st_as_sf(coords = c('longitude', 'latitude'), crs=4326) %>% 
+  st_transform(prj) %>% 
+  bind_cols(st_coordinates(.))
+
+ggplot(data_samp, aes(X, Y, fill=Ploidy, shape=Source)) + 
+  backmap + 
+  coord_sf(c(xmi, xma), c(ymi, yma), expand = F, crs=prj) +
+  geom_point(alpha=.8, size=3, position=position_jitter(100000, 100000)) +
+  scale_fill_manual(values=c('#1E77B4', '#FF7E0F', 'grey30')) +
+  scale_shape_manual(values = c(21,24)) +
+  theme(legend.position = c(.16, .18),
+        legend.background = element_blank(),
+        legend.box.background = element_rect(fill='#FFFFFF99', linetype = 0),
+        legend.spacing.x = unit(0, 'in'),
+        legend.key = element_blank(),
+        legend.box.just = 'top',
+        legend.box = 'horizontal',
+        axis.title = element_blank()) +
+  guides(fill=guide_legend(override.aes = list(shape=21), order = 1))
+
+# ggsave('sib-lyr_samp-map.png', width=8, height=5)
+# ggsave('sib-lyr_samp-map.pdf', width=8, height=5)
+
+# TODO: aggregate points from population samples and plot as a single point with number
+```
+
+## Admixture piecharts map (Figure 2b)
+
+### Prepare data
+
+```{r}
+data_ind <- read_table('8.Q', col_names = c('Ind', paste("Cluster",1:8))) %>% 
+  left_join(read_tsv('seln_scan.tsv', col_names = c('Ind', 'Site', 'latitude', 'longitude', 'ploidy')))
+
+# take average cluster contributions within ploidy levels at given locations
+# then reproject
+data_pop <- data_ind %>% 
+  group_by(latitude, longitude, ploidy) %>% 
+  summarize(across(contains('Cluster'), mean)) %>% 
+  mutate(lon=longitude,lat=latitude) %>% 
+  st_as_sf(coords = c('lon', 'lat'), crs=4326) %>% 
+  st_transform(prj) %>% 
+  bind_cols(st_coordinates(.)) %>% 
+  mutate(across(c(longitude,latitude), as.numeric)) %>% 
+  filter(longitude > -20 | longitude < -170,
+         ploidy %in% c('2', '4'))
+```
+
+### Add better-looking piechart coordinates
+
+(might need to rerun several times for optimal repelling)
+
+```{r}
+pie_size <- 3
+
+data_pop <- get_repel_coords(data_pop,
+               ggplot() + expand_limits(x=c(xmi, xma), y=c(ymi, yma), expand=F), 1, 1, 
+               point.size=NA, size=pie_size/2, force=1, max.iter=1000)
+```
+
+### Draw the map
+
+```{r}
+cols8 = c("grey90", "grey20", "#ffff00", "#0066cc", "#f68b1f", "grey50", "#00cccc", "#ff00cc", "red", "darkgreen") # without transp
+
+ggplot(data_pop, aes(X, Y)) + 
+  backmap + 
+  geom_sf(aes(color="LGM ice sheet extent"), lgm, 
+          fill='#eeeeee99', linewidth=1, linetype='11', inherit.aes = F) +
+  coord_sf(c(xmi, xma), c(ymi, yma), expand = F, crs=prj) +
+  geom_segment(aes(xend=x.repel, yend=y.repel), 
+               color='grey40') +
+  geom_point(aes(x.repel, y.repel, color=ploidy), 
+             size=pie_size, shape=1, stroke=1.2) +
+  geom_scatterpie(aes(x.repel, y.repel, r=23000*pie_size), data_pop, 
+                  color=NA, cols=grep('Cluster', names(data_pop), value=T)) +
+  scale_fill_manual(values = cols8) + 
+  scale_color_manual(values=c('#FFFFFFBB', '#000000BB', 'grey40'), 
+                     labels=c('Diploids', 'Tetraploids', 'LGM ice sheet extent'), 
+                     name=element_blank()) +
+  guides(fill="none",
+         color=guide_legend(override.aes = list(
+           fill=c('#FFFFFF00', '#FFFFFF00', '#eeeeee'),
+           shape=c(1,1,NA),
+           linewidth=c(NA,NA,1)
+         ))) +
+  theme(legend.position = c(.02, .2),
+        legend.background = element_rect(fill='#99999999'),
+        legend.key = element_blank(),
+        legend.title = element_blank(),
+        legend.margin = margin(0,.1,.1,.1, 'in'),
+        legend.box.just = 'left',
+        legend.justification = c(0,.5),
+        axis.title = element_blank()
+  )
+
+#ggsave('sib-lyr_admix_map_lgm.png', width=2200, height=1124, units = 'px') 
+#ggsave('sib-lyr_admix_map_lgm.pdf', width=8, height=5) 
+```
+
+## Map of live samples + chromosome spreads (Supplementary figure 1)
+
+Relies on `data_ind` object created for the admixture map [Prepare data]
+
+```{r}
+# Assign samples to clusters using primary admixture group
+data_live <- data_ind %>% 
+  pivot_longer(contains('Cluster')) %>% 
+  group_by(Ind) %>% 
+  filter(value == max(value)) %>% 
+  filter(grepl('al|BAM|NT|TE|PU|WS', Ind)) %>% 
+  dplyr::select(!c(Site, value)) %>% 
+  mutate(lon = longitude, lat = latitude) %>% 
+  st_as_sf(coords = c('lon', 'lat'), crs=4326) %>% 
+  st_transform(prj) %>% 
+  bind_cols(st_coordinates(.))
+
+xmi2 <- min(data_live$X)-500000
+xma2 <- max(data_live$X)+200000
+ymi2 <- min(data_live$Y)-500000
+yma2 <- max(data_live$Y)+500000
+
+# repel points
+data_live <- data_live %>% ungroup %>% 
+  mutate(population = str_match(Ind, '[a-zA-Z]+_?[0-9]+')) %>% 
+  distinct(population, .keep_all = T) %>% 
+  get_repel_coords(ggplot() + expand_limits(x=c(xmi2, xma2), y=c(ymi2, yma2), expand=F), 1, 1, 
+                   point.size=NA, force=1, max.iter=1000)
+
+# Samples with spreads to show
+# Some imaged samples (`highlight`) 
+# are not in the sequencing dataset, so, not in `data_live`
+# but samples from their populations = locations (`highlight_pop`) are, 
+# so we use them to get the coordinates
+
+highlight <- c('AL1.5-3', 'NT2.4-1', 'PU6.6-1', 'TE8.8-2', 'WS1.1-2')
+highlight_pop <- c('al1', 'NT2', 'PU_6', 'TE_8', 'WS_1')
+spreads <- data_live %>% 
+  filter(population %in% highlight_pop) %>% 
+  mutate(id=highlight,
+         spread=paste0('spreads/', highlight, '_crop.jpeg'),
+         Y=2300000) %>% 
+  rename(x.repel.pop = x.repel,
+         y.repel.pop = y.repel) %>% 
+  get_repel_coords(ggplot() + expand_limits(x=c(xmi2, xma2), y=c(ymi2, yma2), expand=F), 1, 1, 
+                   point.size=NA, force=1, max.iter=1000, direction="x", size=80, xlim=c(xmi2, xma2))
+
+# Subset colors
+cols8_live <- c("#ffff00", "#0066cc", "#f68b1f", "#ff00cc")
+
+ggplot(data_live, aes(X, Y)) + 
+  backmap + 
+  coord_sf(c(xmi2, xma2), c(ymi2, yma2), expand = F, crs=prj) +
+  geom_segment(aes(xend=x.repel, yend=y.repel), color='grey40') +
+  geom_segment(aes(x.repel, xend=x.repel.pop, yend=y.repel.pop), spreads, 
+               color='grey40', linetype="longdash") +
+  geom_point(aes(x.repel, y.repel, color=ploidy, fill=name), 
+             size=3, shape=21, stroke=1.2) +
+  geom_image(aes(x.repel, image=spread), spreads, size=.3) +
+  scale_fill_manual(values = cols8_live) + 
+  scale_color_manual(values=c('#FFFFFFBB', '#000000BB'), 
+                     name='Ploidy') +
+  guides(fill="none") +
+  theme(legend.position = c(.24, .82),
+        legend.background = element_rect(fill='#99999999'),
+        legend.key = element_blank(),
+        legend.box.just = 'left',
+        axis.title = element_blank())
+
+#ggsave('sib-lyr_live-map.png', width=8, height=4)
+#ggsave('sib-lyr_live-map.pdf', width=8, height=4)
+```
+
+## Vector outline (Figure 3a)
+
+```{r}
+circles <- tribble(
+  ~fil, ~x0, ~y0, ~r,
+  "grey90", xmi + 1300000, ymi + 3000000, 750000,
+  "#ff00cc", xmi + 4400000, ymi + 3000000, 750000,
+  "#ffff00", xmi + 6500000, ymi + 3000000, 750000,
+)
+
+arws <- circles %>% 
+  mutate(
+    x1 = x0 + r*1.15 ,#- 100000,
+    x2 = lead(x0)- r*1.15 ,#+ 100000,
+    y1 = y0,
+    y2 = lead(y0)
+  ) %>% 
+  na.omit() %>% 
+  mutate(
+    #across(y1:y2, ~`+`(.x, 650000)),
+    clr = c('black', '#8d8d8b')
+  )
+
+ggplot(vec) + 
+  geom_sf(color='grey50') + 
+  coord_sf(c(xmi,xma),c(ymi2,yma), expand=F, crs=prj) +
+  geom_circle(aes(x0 = x0, y0 = y0, r = r, fill=fil), circles, alpha=.8, color='#FFFFFF00', inherit.aes = F) +
+  geom_segment(aes(x=x1,xend=x2,y=y1,yend=y2, color=clr), arws,
+               linewidth=2.5, curvature=-0.5, linejoin = 'mitre',
+               arrow = arrow(
+                 ends = 'both', 
+                 length = unit(.05, 'in'), 
+                 type = 'closed')
+               ) +
+  scale_fill_manual(values = c("grey90" = "grey90", 
+                               "#ff00cc" = "#ff00cc", 
+                               "#ffff00" = "#ffff00")) +
+  scale_color_manual(values = c("#8d8d8b" = "#8d8d8b", 
+                                "black" = "black")) +
+  theme(axis.title = element_blank(),
+        legend.position = 'none')
+
+#ggsave('contours.png', width=8, height=3)
+#ggsave('contours.pdf', width=8, height=3)
+```
